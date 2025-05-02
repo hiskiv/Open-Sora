@@ -4,20 +4,30 @@ dataset = dict(
     transform_name="resize_crop",
 )
 
+# bucket_config = {
+#     "360p": {
+#         49: (1.0, 10),  # 15
+#         65: (1.0, 7),  # 20
+#         81: (1.0, 6),  # 25
+#         97: (1.0, 5),  # 30
+#         113: (1.0, 4),  # 35
+#     },
+#     "720p": {
+#         49: (0.25, 2),  # 15
+#         65: (0.25, 1),  # 20
+#         81: (0.25, 1),  # 25
+#         97: (0.25, 1),  # 30
+#         113: (0.25, 1),  # 35
+#     },
+# }
 bucket_config = {
-    "360p": {
-        49: (1.0, 10),  # 15
-        65: (1.0, 7),  # 20
-        81: (1.0, 6),  # 25
-        97: (1.0, 5),  # 30
-        113: (1.0, 4),  # 35
-    },
-    "720p": {
-        49: (0.25, 2),  # 15
-        65: (0.25, 1),  # 20
-        81: (0.25, 1),  # 25
-        97: (0.25, 1),  # 30
-        113: (0.25, 1),  # 35
+    "256": {
+        # 1: (1.0, 60),
+        40: (1.0, 5),  # 15
+        # 65: (1.0, 3),  # 20
+        # 81: (1.0, 3),  # 25
+        # 97: (1.0, 2),  # 30
+        # 113: (1.0, 2),  # 35
     },
 }
 
@@ -26,19 +36,19 @@ drop_condition = {
     "cond": 0.05,
     "text": 0.05,
     "null": 0.05,
-    "keep": 0.85,  # 85% of the time don't drop anything
+    "keep": 0.90,  # 85% of the time don't drop anything
 }
 
 # i2v & v2v condition
 mask_types = {
-    "i2v_head": 5,
-    "i2v_tail": 2,
-    "i2v_loop": 2,
+    # "i2v_head": 5,
+    # "i2v_tail": 2,
+    # "i2v_loop": 2,
     "v2v_head": 1,
     "v2v_head_noisy": 2,
-    "v2v_tail": 1,
-    "other": 1,
-    "none": 2,
+    # "v2v_tail": 1,
+    # "other": 1,
+    # "none": 2,
 }
 
 grad_checkpoint = True
@@ -63,7 +73,7 @@ model = dict(
 )
 vae = dict(
     type="OpenSoraVAE_V1_3",
-    from_pretrained="/home/guoxinying/open_source_video_ocean_V1/OpenSora-VAE-v1.3",
+    from_pretrained="/users/xiaokangliu/models/OpenSora-VAE-v1.3",
     z_channels=16,
     micro_batch_size=1,
     micro_batch_size_2d=4,
@@ -76,9 +86,9 @@ vae = dict(
 )
 text_encoder = dict(
     type="t5",
-    from_pretrained="pretrained_models/t5-v1_1-xxl",
+    from_pretrained="DeepFloyd/t5-v1_1-xxl",
     model_max_length=300,
-    shardformer=True,
+    shardformer=False,
 )
 scheduler = dict(
     type="rflow",

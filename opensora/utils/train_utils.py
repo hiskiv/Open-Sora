@@ -264,9 +264,10 @@ def get_mask_cond(randgen, mask_types) -> str:
     return mask_cond
 
 
-def get_mask_index(mask_cond, latent_t):
+def get_mask_index(mask_cond, latent_t, condtion_frame_length=3):
     if mask_cond == "v2v_head" or mask_cond == "v2v_head_noisy":
-        mask_index = [k for k in range(latent_t // 2)]
+        # mask_index = [k for k in range(latent_t // 2)]
+        mask_index = [k for k in range(condtion_frame_length)]
     elif mask_cond == "v2v_tail":
         mask_index = [k for k in range(latent_t // 2, latent_t)]
     elif mask_cond == "i2v" or mask_cond == "i2v_head":  # equivalent

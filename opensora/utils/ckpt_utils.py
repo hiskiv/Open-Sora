@@ -242,7 +242,7 @@ def load_checkpoint(
     strict=False,
     adapt_16ch=False,
     cache_dir=None,
-    device: torch.device | str = "cpu",
+    device: torch.device = "cpu",
 ):
     if not os.path.exists(ckpt_path):
         get_logger().info(f"Checkpoint not found at {ckpt_path} trying to download from Hugging Face Hub")
