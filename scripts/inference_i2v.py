@@ -183,6 +183,7 @@ def main():
 
         # == get reference for condition ==
         refs = collect_references_batch(batch_reference_paths, vae, image_size)
+        # print('refs', refs)
 
         # == multi-resolution info ==
         model_args = prepare_multi_resolution_info(

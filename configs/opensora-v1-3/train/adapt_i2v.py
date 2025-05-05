@@ -23,7 +23,7 @@ dataset = dict(
 bucket_config = {
     "256": {
         # 1: (1.0, 60),
-        40: (1.0, 5),  # 15
+        45: (1.0, 8),  # 15
         # 65: (1.0, 3),  # 20
         # 81: (1.0, 3),  # 25
         # 97: (1.0, 2),  # 30
@@ -41,11 +41,11 @@ drop_condition = {
 
 # i2v & v2v condition
 mask_types = {
-    # "i2v_head": 5,
+    "i2v_head": 5,
     # "i2v_tail": 2,
     # "i2v_loop": 2,
-    "v2v_head": 1,
-    "v2v_head_noisy": 2,
+    # "v2v_head": 1,
+    # "v2v_head_noisy": 2,
     # "v2v_tail": 1,
     # "other": 1,
     # "none": 2,
