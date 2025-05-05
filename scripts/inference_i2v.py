@@ -314,7 +314,8 @@ def main():
                 if len(mask_index) > 0:
                     x_cond_mask[:, :, mask_index, :, :] = 1.0
 
-                samples = scheduler.sample(
+                # samples = scheduler.sample(
+                samples = scheduler.sample_with_logprobs(
                     model,
                     text_encoder,
                     z=z,
