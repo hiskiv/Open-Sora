@@ -59,41 +59,42 @@ def main():
 
     # == colossalai init distributed training ==
     # NOTE: A very large timeout is set to avoid some processes exit early
-    dist.init_process_group(backend="nccl", timeout=timedelta(hours=24))
-    torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
-    set_seed(cfg.get("seed", 1024))
+    # dist.init_process_group(backend="nccl", timeout=timedelta(hours=24))
+    # torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
+    # set_seed(cfg.get("seed", 1024))
     # set seed (device_specific is very important to get different prompts on different devices)
     # set_seed(cfg.get("seed", 1024), device_specific=True)
-    coordinator = DistCoordinator()
-    device = get_current_device()
+    # coordinator = DistCoordinator()
+    # device = get_current_device()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # == init exp_dir ==
     exp_name, exp_dir = define_experiment_workspace(cfg)
-    coordinator.block_all()
-    if coordinator.is_master():
-        os.makedirs(exp_dir, exist_ok=True)
-        save_training_config(cfg.to_dict(), exp_dir)
-    coordinator.block_all()
+    # coordinator.block_all()
+    # if coordinator.is_master():
+    os.makedirs(exp_dir, exist_ok=True)
+    save_training_config(cfg.to_dict(), exp_dir)
+    # coordinator.block_all()
 
     # == init logger, tensorboard & wandb ==
     logger = create_logger(exp_dir)
     logger.info("Experiment directory created at %s", exp_dir)
     logger.info("Training configuration:\n %s", pformat(cfg.to_dict()))
-    if coordinator.is_master():
-        tb_writer = create_tensorboard_writer(exp_dir)
-        if cfg.get("wandb", False):
-            wandb.init(project="Open-Sora", name=exp_name, config=cfg.to_dict(), dir=exp_dir)
+    # if coordinator.is_master():
+    tb_writer = create_tensorboard_writer(exp_dir)
+    if cfg.get("wandb", False):
+        wandb.init(project="Open-Sora", name=exp_name, config=cfg.to_dict(), dir=exp_dir)
 
     # == init ColossalAI booster ==
-    plugin = create_colossalai_plugin(
-        plugin=cfg.get("plugin", "zero2"),
-        dtype=cfg_dtype,
-        grad_clip=cfg.get("grad_clip", 0),
-        sp_size=cfg.get("sp_size", 1),
-        reduce_bucket_size_in_m=cfg.get("reduce_bucket_size_in_m", 20),
-    )
-    booster = Booster(plugin=plugin)
-    torch.set_num_threads(1)
+    # plugin = create_colossalai_plugin(
+    #     plugin=cfg.get("plugin", "zero2"),
+    #     dtype=cfg_dtype,
+    #     grad_clip=cfg.get("grad_clip", 0),
+    #     sp_size=cfg.get("sp_size", 1),
+    #     reduce_bucket_size_in_m=cfg.get("reduce_bucket_size_in_m", 20),
+    # )
+    # booster = Booster(plugin=plugin)
+    # torch.set_num_threads(1)
 
     # == build text-encoder ==
     text_encoder = build_module(cfg.get("text_encoder", None), MODELS, device=device, dtype=dtype)
@@ -218,12 +219,12 @@ def main():
     # == boosting ==
     # NOTE: we set dtype first to make initialization of model consistent with the dtype; then reset it to the fp32 as we make diffusion scheduler in fp32
     torch.set_default_dtype(dtype)
-    model, optimizer, _, dataloader, lr_scheduler = booster.boost(
-        model=model,
-        optimizer=optimizer,
-        lr_scheduler=lr_scheduler,
-        dataloader=dataloader,
-    )
+    # model, optimizer, _, dataloader, lr_scheduler = booster.boost(
+    #     model=model,
+    #     optimizer=optimizer,
+    #     lr_scheduler=lr_scheduler,
+    #     dataloader=dataloader,
+    # )
     torch.set_default_dtype(torch.float)
     logger.info("Boosting model for distributed training")
 
@@ -237,7 +238,7 @@ def main():
     if cfg.get("load", None) is not None:
         logger.info("Loading checkpoint")
         ret = load(
-            booster,
+            # booster,
             cfg.load,
             model=model,
             ema=ema,
@@ -259,7 +260,7 @@ def main():
     # =======================================================
     # 5. training loop
     # =======================================================
-    dist.barrier()
+    # dist.barrier()
     timers = {}
     timer_keys = [
         "move_data",
@@ -276,7 +277,7 @@ def main():
     ]
     for key in timer_keys:
         if record_time:
-            timers[key] = Timer(key, coordinator=coordinator)
+            timers[key] = Timer(key, coordinator=None)
         else:
             timers[key] = nullcontext()
     if record_time:
@@ -299,7 +300,7 @@ def main():
         with tqdm(
             enumerate(dataloader_iter, start=start_step),
             desc=f"Epoch {epoch}",
-            disable=not coordinator.is_master(),
+            disable=False,
             initial=start_step,
             total=num_steps_per_epoch,
         ) as pbar:
@@ -384,8 +385,6 @@ def main():
                     x_cond_mask = torch.zeros(target_shape, device=device).to(dtype)
                     if len(mask_index) > 0:
                         x_cond_mask[:, :, mask_index, :, :] = 1.0
-                    ############ Hard encoding; NEED TO MODIFY ############
-                    additional_args = {'height': torch.tensor([x.shape[-1]], device=device, dtype=dtype), 'width': torch.tensor([x.shape[-1]], device=device, dtype=dtype), 'num_frames': torch.tensor([x.shape[2]], device=device, dtype=dtype), 'ar': torch.tensor([1.], device=device, dtype=dtype), 'fps': torch.tensor([24.], device=device, dtype=dtype)}
                     videos, timesteps, all_latents, all_log_probs, gs = scheduler.sample_with_logprobs(
                         model,
                         text_encoder,
@@ -394,7 +393,7 @@ def main():
                         z_cond_mask=x_cond_mask,
                         prompts=y,
                         device=device,
-                        additional_args=additional_args,
+                        additional_args=model_args,
                         progress=False,
                         mask=None,
                         mask_index=mask_index,
@@ -446,7 +445,7 @@ def main():
         # ungather advantages; we only need to keep the entries corresponding to the samples on this process
         samples["advantages"] = (
             torch.as_tensor(advantages)
-            .reshape(coordinator.world_size, -1)[coordinator.local_rank]
+            .reshape(1)[0]
             .to(device)
         )
 
@@ -472,7 +471,7 @@ def main():
                 list(enumerate(samples_batched)),
                 desc=f"Inner Epoch {epoch}.{inner_ep}: training",
                 position=0,
-                disable=not coordinator.is_master(),
+                disable=False,
             ):
                 for j in range(len(sample['timestep'])):
                     # == diffusion loss computation ==
@@ -518,12 +517,11 @@ def main():
                         # loss = loss_dict["loss"].mean()
                         loss = loss / accumulation_steps
                         ctx = (
-                            booster.no_sync(model, optimizer)
-                            if cfg.get("plugin", "zero2") in ("zero1", "zero1-seq") and (step + 1) % accumulation_steps != 0
-                            else nullcontext()
+                            nullcontext()
                         )
                         with ctx:
-                            booster.backward(loss=loss, optimizer=optimizer)
+                            # booster.backward(loss=loss, optimizer=optimizer)
+                            pass
                         if (step + 1) % accumulation_steps == 0:
                             optimizer.step()
                             optimizer.zero_grad()
@@ -552,7 +550,7 @@ def main():
 
                     with timers["log"] as log_t:
                         # == logging ==
-                        if coordinator.is_master() and (global_step + 1) % cfg.get("log_every", 1) == 0:
+                        if (global_step + 1) % cfg.get("log_every", 1) == 0:
                             avg_loss = running_loss / log_step
                             # progress bar
                             pbar.set_postfix({"loss": avg_loss, "step": step, "global_step": global_step})
@@ -593,7 +591,7 @@ def main():
                         if ckpt_every > 0 and (global_step + 1) % ckpt_every == 0:
                             model_gathering(ema, ema_shape_dict)
                             save_dir = save(
-                                booster,
+                                # booster,
                                 exp_dir,
                                 model=model,
                                 ema=ema,

@@ -236,6 +236,12 @@ class RFLOW:
                 z_cond_in = torch.cat([z_cond, z_cond, torch.zeros_like(z_cond).to(z_cond.device).to(z_cond.dtype)], 0)
                 z_cond_mask_in = torch.cat([z_cond_mask, z_cond_mask, z_cond_mask], 0)
 
+                print(z_in.shape)
+                print(t.shape)
+                print(z_cond_in.shape)
+                print(z_cond_mask_in.shape)
+                print(y_null.shape)
+                print(model_args)
                 pred = model(
                     z_in,
                     t,
@@ -307,7 +313,7 @@ class RFLOW:
         #    you need to have defined self.lambda_fn(t) → tensor (B,)
         # lambda_t = self.lambda_fn(timestep)          # shape (B,)
         lambda_t = timestep # linear lambda_fn
-        sigma = torch.sqrt(2.0 * lambda_t.view(shape) * dt_b)
+        sigma = torch.sqrt(2.0 * lambda_t.view(1, 1, 1, 1, 1).expand(*shape) * dt_b)
 
         # 3) sample (if not provided)
         if prev_sample is None:
@@ -362,6 +368,7 @@ class RFLOW:
         # text encoding
         model_args = text_encoder.encode(**text_encoder.tokenize_fn(prompts))
         y_null = text_encoder.null(n)  # [n, 1, 300, 4096] where n is batch size
+        self.y_null = y_null
         if neg_prompts is None:
             if mask_index is not None and len(mask_index) > 0:
                 model_args["y"] = torch.cat([model_args["y"], y_null, y_null], 0)
@@ -631,6 +638,7 @@ class RFLOW:
             text_uncond_prob=text_uncond_prob,
             image_gs=gs[0],
             text_gs=gs[1],
+            y_null=self.y_null,
             **kwargs,
         )
 

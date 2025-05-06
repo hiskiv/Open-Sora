@@ -103,7 +103,7 @@ outputs = "outputs/"
 wandb = False
 epochs = 1000
 log_every = 8
-ckpt_every = 200
+ckpt_every = 500
 
 # optimization settings
 grad_clip = 1.0

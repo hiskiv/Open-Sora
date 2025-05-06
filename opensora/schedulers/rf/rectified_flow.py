@@ -52,7 +52,8 @@ class RFlowScheduler:
         text_uncond_prob=None,
         x_noisy_ref=None,
         image_gs=None,
-        text_gs=None
+        text_gs=None,
+        y_null=None
     ):
         """
         Compute training losses for a single timestep.
@@ -67,11 +68,11 @@ class RFlowScheduler:
             x_cond_mask[:, :, mask_index, :, :] = 1.0
             x_noisy_ref = x_noisy_ref if x_noisy_ref is not None else x_start
             x_cond = x_noisy_ref * x_cond_mask
-            y_null = (
-                model.module.y_embedder.y_embedding[None]
-                .repeat(model_kwargs["y"].shape[1], 1, 1)[:, None]
-                .expand_as(model_kwargs["y"])
-            )
+            # y_null = (
+            #     model.module.y_embedder.y_embedding[None]
+            #     .repeat(model_kwargs["y"].shape[1], 1, 1)[:, None]
+            #     .expand_as(model_kwargs["y"])
+            # )
             condition = random.choices(
                 list(self.drop_condition.keys()), weights=list(self.drop_condition.values()), k=1
             )[0]

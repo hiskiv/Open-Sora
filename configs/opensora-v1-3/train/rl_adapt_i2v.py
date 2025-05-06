@@ -112,5 +112,12 @@ ema_decay = 0.99
 adam_eps = 1e-15
 warmup_steps = 1000
 
+adv_clip_max = 5
+clip_range = 1e-4
+
 # v2v params
 accumulation_steps = 1
+
+use_sdedit = True
+use_oscillation_guidance_for_text = True
+use_oscillation_guidance_for_image = True

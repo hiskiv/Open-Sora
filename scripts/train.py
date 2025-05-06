@@ -60,9 +60,9 @@ def main():
     # NOTE: A very large timeout is set to avoid some processes exit early
     dist.init_process_group(backend="nccl", timeout=timedelta(hours=24))
     torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
-    # set_seed(cfg.get("seed", 1024))
+    set_seed(cfg.get("seed", 1024))
     # set seed (device_specific is very important to get different prompts on different devices)
-    set_seed(cfg.get("seed", 1024), device_specific=True)
+    # set_seed(cfg.get("seed", 1024), device_specific=True)
     coordinator = DistCoordinator()
     device = get_current_device()
 
