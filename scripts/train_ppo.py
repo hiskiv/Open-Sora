@@ -22,6 +22,7 @@ from opensora.registry import DATASETS, MODELS, SCHEDULERS, build_module
 from opensora.utils.ckpt_utils import load, model_gathering, model_sharding, record_model_param_shape, save
 from opensora.utils.config_utils import define_experiment_workspace, parse_configs, save_training_config
 from opensora.utils.lr_scheduler import LinearWarmupLR
+from opensora.utils.rewards import circle_reward
 from opensora.utils.misc import (
     Timer,
     all_reduce_mean,
@@ -278,6 +279,10 @@ def main():
             timers[key] = nullcontext()
     if record_time:
         record_file = open(os.path.join(exp_dir, f"record_time_r{dist.get_rank()}.txt"), "w")
+    
+    use_sdedit = cfg.get("use_sdedit", False)
+    use_oscillation_guidance_for_text = cfg.get("use_oscillation_guidance_for_text", None)
+    use_oscillation_guidance_for_image = cfg.get("use_oscillation_guidance_for_image", None)
 
     accumulation_steps = cfg.get("accumulation_steps", 1)
     for epoch in range(start_epoch, cfg_epochs):
@@ -286,6 +291,8 @@ def main():
         dataloader_iter = iter(dataloader)
         logger.info("Beginning epoch %s...", epoch)
 
+        samples = []
+        
         # == training loop in an epoch ==
         with tqdm(
             enumerate(dataloader_iter, start=start_step),
@@ -314,7 +321,7 @@ def main():
                     if mask_types is not None:
                         mask_cond = get_mask_cond(mask_randgen, mask_types)
                         if num_frames > 1:  # NOTE: only use mask_indx for video
-                            mask_index = get_mask_index(mask_cond, latent_t)
+                            mask_index = get_mask_index(mask_cond, latent_t) # for i2v, =[0]
                             if len(mask_index) > 0:
                                 text_uncond_prob = 0.0
                 if record_time:
@@ -324,33 +331,11 @@ def main():
                 with timers["encode"] as encode_t:
                     x_noisy_ref = None  # for v2v, add a little noise to video's referenced part
                     with torch.no_grad():
-                        # Prepare visual inputs
-                        if cfg.get("load_video_features", False):
-                            x = x.to(device, dtype)
-                            x_gt = x
-                            # NOTE: x_noisy_ref is skipped for now
-                        elif cfg.get("noise_augmentation", False) and x.shape[2] > 1:
-                            x, x_gt = aug_x(
-                                x,
-                                vae,
-                                cfg.get("noise_prob", {}),
-                                cfg.get("noise_strength", {}),
-                            )
-                            # NOTE: x_noisy_ref is skipped for now
-                        else:
-                            if 0 in mask_index and "noisy" in mask_cond:
-                                v2v_noise_min_weight = cfg.model.get("v2v_noise_min_weight", 0.1)
-                                v2v_noise_max_weight = cfg.model.get("v2v_noise_max_weight", 0.3)
-                                v2v_noise_ratio = v2v_noise_min_weight + random.uniform(0, 1) * (
-                                    v2v_noise_max_weight - v2v_noise_min_weight
-                                )
-                                x_noisy = v2v_noise_ratio * torch.randn_like(x) + (1 - v2v_noise_ratio) * x
-                            else:
-                                x_noisy = x
+                        x_noisy = x
 
-                            x_noisy_ref = vae.encode(x_noisy)
+                        x_noisy_ref = vae.encode(x_noisy)
 
-                            x_gt = x = vae.encode(x)  # [B, C, T, H/P, W/P]
+                        x_gt = x = vae.encode(x)  # [B, C, T, H/P, W/P]
 
                         # Prepare text inputs
                         if cfg.get("load_text_features", False):
@@ -381,139 +366,263 @@ def main():
                 if record_time:
                     timer_list.append(move_args_t)
 
-                # == diffusion loss computation ==
-                with timers["diffusion"] as loss_t:
-                    if len(mask_index) > 0:  # i2v and v2v training
-                        model_args["x_mask"] = None  # Don't use any other input masks
-                        mask = None
-                    loss_dict = scheduler.training_losses(
+                # == sampling latents, log_prob and generated videos ==
+                with torch.no_grad():
+                    cond_type = cfg.get("cond_type", None)
+                    image_cfg_scale = None
+                    image_cfg_scale = cfg.get("image_cfg_scale", 7.5)
+                    target_shape = [x.shape[0], vae.out_channels, *latent_size]
+
+                    # ref, mask_index = prep_ref_and_mask(
+                    #     cond_type, condition_frame_length, refs, target_shape, loop, device, dtype
+                    # )
+                    ref = torch.zeros(target_shape, device=device, dtype=dtype)
+                    ref[:, :, mask_index] = x_gt[:, :, mask_index]
+                    z = torch.randn(x.shape[0], vae.out_channels, *latent_size, device=device, dtype=dtype)
+                    x_cond_mask = torch.zeros(x.shape[0], vae.out_channels, *latent_size, device=device).to(dtype)
+                    if len(mask_index) > 0:
+                        x_cond_mask[:, :, mask_index, :, :] = 1.0
+                    videos, timesteps, all_latents, all_log_probs, gs = scheduler.sample_with_logprobs(
                         model,
-                        x,
-                        model_kwargs=model_args,
-                        mask=mask,
+                        text_encoder,
+                        z=z,
+                        z_cond=ref,
+                        z_cond_mask=x_cond_mask,
+                        prompts=y,
+                        device=device,
+                        additional_args=model_args,
+                        progress=False,
+                        mask=None,
                         mask_index=mask_index,
-                        x_gt=x_gt,
-                        noise_disable_threshold=cfg.get("noise_disable_threshold", None),
-                        text_uncond_prob=text_uncond_prob,
-                        x_noisy_ref=x_noisy_ref,
+                        image_cfg_scale=image_cfg_scale,
+                        neg_prompts=None,  # no mask for i2v and v2v
+                        use_sdedit=use_sdedit,
+                        use_oscillation_guidance_for_text=use_oscillation_guidance_for_text,
+                        use_oscillation_guidance_for_image=use_oscillation_guidance_for_image,
                     )
-                if record_time:
-                    timer_list.append(loss_t)
 
-                # == backward & update ==
-                with timers["backward"] as backward_t:
-                    loss = loss_dict["loss"].mean()
-                    loss = loss / accumulation_steps
-                    ctx = (
-                        booster.no_sync(model, optimizer)
-                        if cfg.get("plugin", "zero2") in ("zero1", "zero1-seq") and (step + 1) % accumulation_steps != 0
-                        else nullcontext()
+                    all_latents = torch.stack(all_latents, dim=1).to('cpu')  # (B, num_steps + 1, F, C, H, W)
+                    all_log_probs = torch.stack(all_log_probs, dim=1).to('cpu')  # (B, num_steps, 1)
+
+                    # videos = vae.decode(videos.to(dtype))
+                    # rewards = circle_reward(x, videos)
+                    rewards = torch.rand(all_log_probs.shape) # TBD
+                    ########## Also consider implement asynchronous reward computing
+
+                    samples.append(
+                        {
+                            "x_gt": x_gt.to('cpu'),
+                            "x_noise_ref": x_noisy_ref.to('cpu'),
+                            "model_args": model_args,
+                            "gs": gs,
+                            "timesteps": timesteps,
+                            "latents": all_latents[
+                                :, :-1
+                            ],  # each entry is the latent before timestep t
+                            "next_latents": all_latents[
+                                :, 1:
+                            ],  # each entry is the latent after timestep t
+                            "log_probs": all_log_probs,
+                            "rewards": rewards,
+                        }
                     )
-                    with ctx:
-                        booster.backward(loss=loss, optimizer=optimizer)
-                    if (step + 1) % accumulation_steps == 0:
-                        optimizer.step()
-                        optimizer.zero_grad()
+            
+        # MARKER
+        # == postprocessing saved samples ==
+        samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
 
-                    # update learning rate
-                    if lr_scheduler is not None:
-                        lr_scheduler.step()
-                if record_time:
-                    timer_list.append(backward_t)
+        # gather rewards across processes
+        # rewards = coordinator.gather(samples["rewards"]).cpu().numpy()
 
-                # == update EMA ==
-                with timers["update_ema"] as ema_t:
-                    update_ema(ema, model.module, optimizer=optimizer, decay=cfg.get("ema_decay", 0.9999))
-                if record_time:
-                    timer_list.append(ema_t)
+        # log rewards and images
+        logger.info("reward: %s, epoch: %s, reward_mean: %s, reward_std: %s", rewards, epoch, rewards.mean(), rewards.std())
 
-                # == update log info ==
-                with timers["reduce_loss"] as reduce_loss_t:
-                    all_reduce_mean(loss.data)
-                    running_loss += loss.item() * accumulation_steps
-                    global_step = epoch * num_steps_per_epoch + step
-                    log_step += 1
-                    acc_step += 1
-                if record_time:
-                    timer_list.append(reduce_loss_t)
+        advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
 
-                with timers["log"] as log_t:
-                    # == logging ==
-                    if coordinator.is_master() and (global_step + 1) % cfg.get("log_every", 1) == 0:
-                        avg_loss = running_loss / log_step
-                        # progress bar
-                        pbar.set_postfix({"loss": avg_loss, "step": step, "global_step": global_step})
-                        # tensorboard
-                        tb_writer.add_scalar("loss", loss.item() * accumulation_steps, global_step)
-                        # wandb
-                        if cfg.get("wandb", False):
-                            wandb_dict = {
-                                "iter": global_step,
-                                "acc_step": acc_step,
-                                "epoch": epoch,
-                                "loss": loss.item() * accumulation_steps,
-                                "avg_loss": avg_loss,
-                                "lr": optimizer.param_groups[0]["lr"],
-                            }
-                            if record_time:
-                                wandb_dict.update(
-                                    {
-                                        "debug/move_data_time": move_data_t.elapsed_time,
-                                        "debug/encode_time": encode_t.elapsed_time,
-                                        "debug/mask_time": mask_t.elapsed_time,
-                                        "debug/diffusion_time": loss_t.elapsed_time,
-                                        "debug/backward_time": backward_t.elapsed_time,
-                                        "debug/update_ema_time": ema_t.elapsed_time,
-                                        "debug/reduce_loss_time": reduce_loss_t.elapsed_time,
-                                    }
-                                )
-                            wandb.log(wandb_dict, step=global_step)
+        # ungather advantages; we only need to keep the entries corresponding to the samples on this process
+        samples["advantages"] = (
+            torch.as_tensor(advantages)
+            .reshape(coordinator.world_size, -1)[coordinator.local_rank]
+            .to(device)
+        )
 
-                        running_loss = 0.0
-                        log_step = 0
-                if record_time:
-                    timer_list.append(log_t)
+        del samples["rewards"]
 
-                # == checkpoint saving ==
-                with timers["checkpoint"] as checkpoint_t:
-                    ckpt_every = cfg.get("ckpt_every", 0)
-                    if ckpt_every > 0 and (global_step + 1) % ckpt_every == 0:
-                        model_gathering(ema, ema_shape_dict)
-                        save_dir = save(
-                            booster,
-                            exp_dir,
-                            model=model,
-                            ema=ema,
-                            optimizer=optimizer,
-                            lr_scheduler=lr_scheduler,
-                            sampler=sampler,
-                            epoch=epoch,
-                            step=step + 1,
-                            global_step=global_step + 1,
-                            batch_size=cfg.get("batch_size", None),
+        total_batch_size, num_timesteps = samples["timesteps"].shape
+
+        
+        # == inner epoch ==
+        for inner_ep in range(cfg.get("inner_epoch", 10)):
+            # rebatch for training
+            samples_batched = {
+                k: v.reshape(-1, cfg.get("batch_size", None), *v.shape[1:])
+                for k, v in samples.items()
+            }
+
+            # dict of lists -> list of dicts for easier iteration
+            samples_batched = [
+                dict(zip(samples_batched, x)) for x in zip(*samples_batched.values())
+            ]
+            
+            for i, sample in tqdm(
+                list(enumerate(samples_batched)),
+                desc=f"Inner Epoch {epoch}.{inner_ep}: training",
+                position=0,
+                disable=not coordinator.is_master(),
+            ):
+                for j in range(len(sample['timestep'])):
+                    # == diffusion loss computation ==
+                    with timers["diffusion"] as loss_t:
+                        # RL part and PPO logic
+                        log_prob = scheduler.RL_training_losses(
+                            model,
+                            x,
+                            model_kwargs=samples["model_args"],
+                            mask=None,
+                            mask_index=[0], # i2v default
+                            x_gt=samples["latents"][:, j].to(device),
+                            t=j,
+                            timesteps=samples["timesteps"],
+                            noise_disable_threshold=cfg.get("noise_disable_threshold", None),
+                            text_uncond_prob=text_uncond_prob,
+                            gs=samples["gs"][j],
+                            x_noisy_ref=samples["x_noisy_ref"].to(device),
+                            next_latents=samples["next_latents"][:, j]
                         )
-                        if dist.get_rank() == 0:
-                            model_sharding(ema)
-                        logger.info(
-                            "Saved checkpoint at epoch %s, step %s, global_step %s to %s",
-                            epoch,
-                            step + 1,
-                            global_step + 1,
-                            save_dir,
+
+                        adv_clip_max = cfg.get("adv_clip_max", 5)
+                        clip_range = cfg.get("clip_range", 1e-4)
+                        # ppo logic
+                        advantages = torch.clamp(
+                            sample["advantages"],
+                            -adv_clip_max,
+                            adv_clip_max,
                         )
-                if record_time:
-                    timer_list.append(checkpoint_t)
-                if record_time:
-                    total_step_time = sum([timer.elapsed_time for timer in timer_list])
-                    log_str = (
-                        f"Rank {dist.get_rank()} | Epoch {epoch} | Step {step} | Step time: {total_step_time:.3f}s | "
-                    )
-                    for timer in timer_list:
-                        log_str += f"{timer.name}: {timer.elapsed_time:.3f}s | "
-                    # print(log_str)
-                    log_str += f"path: {paths}"
-                    record_file.write(log_str + "\n")
-                    record_file.flush()
+                        ratio = torch.exp(log_prob - sample["log_probs"][:, j])
+                        unclipped_loss = -advantages * ratio
+                        clipped_loss = -advantages * torch.clamp(
+                            ratio,
+                            1.0 - clip_range,
+                            1.0 + clip_range,
+                        )
+                        loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+                    if record_time:
+                        timer_list.append(loss_t)
+
+                    # == backward & update ==
+                    with timers["backward"] as backward_t:
+                        # loss = loss_dict["loss"].mean()
+                        loss = loss / accumulation_steps
+                        ctx = (
+                            booster.no_sync(model, optimizer)
+                            if cfg.get("plugin", "zero2") in ("zero1", "zero1-seq") and (step + 1) % accumulation_steps != 0
+                            else nullcontext()
+                        )
+                        with ctx:
+                            booster.backward(loss=loss, optimizer=optimizer)
+                        if (step + 1) % accumulation_steps == 0:
+                            optimizer.step()
+                            optimizer.zero_grad()
+
+                        # update learning rate
+                        if lr_scheduler is not None:
+                            lr_scheduler.step()
+                    if record_time:
+                        timer_list.append(backward_t)
+
+                    # == update EMA ==
+                    with timers["update_ema"] as ema_t:
+                        update_ema(ema, model.module, optimizer=optimizer, decay=cfg.get("ema_decay", 0.9999))
+                    if record_time:
+                        timer_list.append(ema_t)
+
+                    # == update log info ==
+                    with timers["reduce_loss"] as reduce_loss_t:
+                        all_reduce_mean(loss.data)
+                        running_loss += loss.item() * accumulation_steps
+                        global_step = epoch * num_steps_per_epoch + step
+                        log_step += 1
+                        acc_step += 1
+                    if record_time:
+                        timer_list.append(reduce_loss_t)
+
+                    with timers["log"] as log_t:
+                        # == logging ==
+                        if coordinator.is_master() and (global_step + 1) % cfg.get("log_every", 1) == 0:
+                            avg_loss = running_loss / log_step
+                            # progress bar
+                            pbar.set_postfix({"loss": avg_loss, "step": step, "global_step": global_step})
+                            # tensorboard
+                            tb_writer.add_scalar("loss", loss.item() * accumulation_steps, global_step)
+                            # wandb
+                            if cfg.get("wandb", False):
+                                wandb_dict = {
+                                    "iter": global_step,
+                                    "acc_step": acc_step,
+                                    "epoch": epoch,
+                                    "loss": loss.item() * accumulation_steps,
+                                    "avg_loss": avg_loss,
+                                    "lr": optimizer.param_groups[0]["lr"],
+                                }
+                                if record_time:
+                                    wandb_dict.update(
+                                        {
+                                            "debug/move_data_time": move_data_t.elapsed_time,
+                                            "debug/encode_time": encode_t.elapsed_time,
+                                            "debug/mask_time": mask_t.elapsed_time,
+                                            "debug/diffusion_time": loss_t.elapsed_time,
+                                            "debug/backward_time": backward_t.elapsed_time,
+                                            "debug/update_ema_time": ema_t.elapsed_time,
+                                            "debug/reduce_loss_time": reduce_loss_t.elapsed_time,
+                                        }
+                                    )
+                                wandb.log(wandb_dict, step=global_step)
+
+                            running_loss = 0.0
+                            log_step = 0
+                    if record_time:
+                        timer_list.append(log_t)
+
+                    # == checkpoint saving ==
+                    with timers["checkpoint"] as checkpoint_t:
+                        ckpt_every = cfg.get("ckpt_every", 0)
+                        if ckpt_every > 0 and (global_step + 1) % ckpt_every == 0:
+                            model_gathering(ema, ema_shape_dict)
+                            save_dir = save(
+                                booster,
+                                exp_dir,
+                                model=model,
+                                ema=ema,
+                                optimizer=optimizer,
+                                lr_scheduler=lr_scheduler,
+                                sampler=sampler,
+                                epoch=epoch,
+                                step=step + 1,
+                                global_step=global_step + 1,
+                                batch_size=cfg.get("batch_size", None),
+                            )
+                            if dist.get_rank() == 0:
+                                model_sharding(ema)
+                            logger.info(
+                                "Saved checkpoint at epoch %s, step %s, global_step %s to %s",
+                                epoch,
+                                step + 1,
+                                global_step + 1,
+                                save_dir,
+                            )
+                    if record_time:
+                        timer_list.append(checkpoint_t)
+                    if record_time:
+                        total_step_time = sum([timer.elapsed_time for timer in timer_list])
+                        log_str = (
+                            f"Rank {dist.get_rank()} | Epoch {epoch} | Step {step} | Step time: {total_step_time:.3f}s | "
+                        )
+                        for timer in timer_list:
+                            log_str += f"{timer.name}: {timer.elapsed_time:.3f}s | "
+                        # print(log_str)
+                        log_str += f"path: {paths}"
+                        record_file.write(log_str + "\n")
+                        record_file.flush()
         sampler.reset()
         start_step = 0
 

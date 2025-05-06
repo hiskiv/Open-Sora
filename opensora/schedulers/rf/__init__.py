@@ -406,6 +406,7 @@ class RFLOW:
 
         all_latents = [z]
         all_log_probs = []
+        gs = []
         for i, t in progress_wrap(enumerate(timesteps)):
             # mask for adding noise
             if mask is not None:  # not for i2v and v2v, need to force mask=None
@@ -473,6 +474,7 @@ class RFLOW:
                     + image_gs * (pred_uncond_text - pred_uncond_all)
                     + text_gs * (pred_cond - pred_uncond_text)
                 )
+
             else:
                 z_in = torch.cat([z, z], 0)
                 t = torch.cat([t, t], 0)
@@ -500,8 +502,9 @@ class RFLOW:
             
             all_latents.append(z)
             all_log_probs.append(step_log_prob)
+            gs.append((image_gs, text_gs))
 
-        return z, all_latents, all_log_probs
+        return z, timesteps, all_latents, all_log_probs, gs
 
     def sample_debug(
         self,
@@ -599,3 +602,48 @@ class RFLOW:
             text_uncond_prob=text_uncond_prob,
             **kwargs,
         )
+    
+    def RL_training_losses(
+        self,
+        model,
+        x_start,
+        model_kwargs=None,
+        noise=None,
+        mask=None,
+        weights=None,
+        t=None,
+        timesteps=None,
+        mask_index=None,
+        text_uncond_prob=None,
+        gs=None,
+        next_latents=None,
+        **kwargs,
+    ):
+        v_pred = self.scheduler.RL_training_losses(
+            model,
+            x_start,
+            model_kwargs,
+            noise,
+            mask,
+            weights,
+            timesteps[t],
+            mask_index=mask_index,
+            text_uncond_prob=text_uncond_prob,
+            image_gs=gs[0],
+            text_gs=gs[1],
+            **kwargs,
+        )
+
+        dt = timesteps[t] - timesteps[t+1] if t < len(timesteps)-1 else timesteps[t]
+        dt = dt / self.num_timesteps  # shape (B,)
+        # z: [B, F, C, H, W], t, dt: [], t: [0, 1000], dt: [0, 1]
+        _, step_log_prob = self.rflow_step_with_logprob(
+            v_pred=v_pred,             # your already-computed velocity field
+            timestep=timesteps[t] / self.num_timesteps,                # the same t you passed into model(...)
+            sample=x_start,                  # current z_t
+            dt=dt,                     # normalized Δt
+            mask_t_upper=None,
+            prev_sample=next_latents
+        )
+
+        return step_log_prob
