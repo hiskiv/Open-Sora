@@ -59,6 +59,8 @@ num_bucket_build_workers = 16  # 16
 dtype = "bf16"
 plugin = "zero2"
 
+load = "/users/xiaokangliu/projects/Open-Sora/outputs/0005-STDiT3-XL-2/epoch96-global_step3000/"
+
 # Model settings
 model = dict(
     type="STDiT3-XL/2",

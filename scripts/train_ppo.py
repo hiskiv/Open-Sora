@@ -88,7 +88,7 @@ def main():
     plugin = create_colossalai_plugin(
         plugin=cfg.get("plugin", "zero2"),
         dtype=cfg_dtype,
-        grad_clip=cfg.get("grad_clip", 0),
+        grad_clip=cfg.get("grad_clip", 1.0),
         sp_size=cfg.get("sp_size", 1),
         reduce_bucket_size_in_m=cfg.get("reduce_bucket_size_in_m", 20),
     )
@@ -287,6 +287,7 @@ def main():
     use_oscillation_guidance_for_image = cfg.get("use_oscillation_guidance_for_image", None)
 
     accumulation_steps = cfg.get("accumulation_steps", 1)
+    global_step = 0
     for epoch in range(start_epoch, cfg_epochs):
         # == set dataloader to new epoch ==
         sampler.set_epoch(epoch)
@@ -294,8 +295,10 @@ def main():
         logger.info("Beginning epoch %s...", epoch)
 
         samples = []
+        samples_args = []
         
         # == training loop in an epoch ==
+        logger.info("Sampling %s...", epoch)
         with tqdm(
             enumerate(dataloader_iter, start=start_step),
             desc=f"Epoch {epoch}",
@@ -304,6 +307,8 @@ def main():
             total=num_steps_per_epoch,
         ) as pbar:
             for step, batch in pbar:
+                if step == 10:
+                    break
                 timer_list = []
                 paths = batch.pop("path")
                 with timers["move_data"] as move_data_t:
@@ -384,9 +389,9 @@ def main():
                     x_cond_mask = torch.zeros(target_shape, device=device).to(dtype)
                     if len(mask_index) > 0:
                         x_cond_mask[:, :, mask_index, :, :] = 1.0
-                    ############ Hard encoding; NEED TO MODIFY ############
+                    ############ Hard encoding of FPS; NEED TO MODIFY ############
                     additional_args = {'height': torch.tensor([x.shape[-1]], device=device, dtype=dtype), 'width': torch.tensor([x.shape[-1]], device=device, dtype=dtype), 'num_frames': torch.tensor([x.shape[2]], device=device, dtype=dtype), 'ar': torch.tensor([1.], device=device, dtype=dtype), 'fps': torch.tensor([24.], device=device, dtype=dtype)}
-                    videos, timesteps, all_latents, all_log_probs, gs = scheduler.sample_with_logprobs(
+                    videos, timesteps, all_latents, all_next_latents, all_log_probs, z_cond, gs = scheduler.sample_with_logprobs(
                         model,
                         text_encoder,
                         z=z,
@@ -406,6 +411,7 @@ def main():
                     )
 
                     all_latents = torch.stack(all_latents, dim=1).to('cpu')  # (B, num_steps + 1, F, C, H, W)
+                    all_next_latents = torch.stack(all_next_latents, dim=1).to('cpu')
                     all_log_probs = torch.stack(all_log_probs, dim=1).to('cpu')  # (B, num_steps, 1)
 
                     # videos = vae.decode(videos.to(dtype))
@@ -415,51 +421,55 @@ def main():
 
                     samples.append(
                         {
-                            "x_gt": x_gt.to('cpu'),
-                            "x_noise_ref": x_noisy_ref.to('cpu'),
-                            "model_args": model_args,
-                            "gs": gs,
-                            "timesteps": timesteps,
-                            "latents": all_latents[
-                                :, :-1
-                            ],  # each entry is the latent before timestep t
-                            "next_latents": all_latents[
-                                :, 1:
-                            ],  # each entry is the latent after timestep t
+                            "latents": all_latents,  # each entry is the latent before timestep t
+                            "next_latents": all_next_latents,  # each entry is the latent after timestep t
                             "log_probs": all_log_probs,
                             "rewards": rewards,
+                        }
+                    )
+
+                    samples_args.append(
+                        {
+                            # "model_args": model_args,
+                            "z_cond": z_cond.to('cpu'),
+                            "timesteps": timesteps,
+                            "gs": gs,
                         }
                     )
             
         # MARKER
         # == postprocessing saved samples ==
-        samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
+        logger.info("Processing samples...")
+        with torch.no_grad():
+            samples = {k: torch.cat([s[k] for s in samples]) for k in samples[0].keys()}
 
-        # gather rewards across processes
-        # rewards = coordinator.gather(samples["rewards"]).cpu().numpy()
+            # gather rewards across processes
+            # rewards = coordinator.gather(samples["rewards"]).cpu().numpy()
 
-        # log rewards and images
-        logger.info("reward: %s, epoch: %s, reward_mean: %s, reward_std: %s", rewards, epoch, rewards.mean(), rewards.std())
+            # log rewards and images
+            logger.info("epoch: %s, reward_mean: %s, reward_std: %s", epoch, rewards.mean(), rewards.std())
 
-        advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            advantages = (samples["rewards"] - samples["rewards"].mean()) / (samples["rewards"].std() + 1e-8)
 
-        # ungather advantages; we only need to keep the entries corresponding to the samples on this process
-        samples["advantages"] = (
-            torch.as_tensor(advantages)
-            .reshape(coordinator.world_size, -1)[coordinator.local_rank]
-            .to(device)
-        )
+            # ungather advantages; we only need to keep the entries corresponding to the samples on this process
+            samples["advantages"] = advantages
+            # samples["advantages"] = (
+            #     torch.as_tensor(advantages)
+            #     .reshape(coordinator.world_size, -1)[coordinator.local_rank]
+            #     .to(device)
+            # )
 
-        del samples["rewards"]
+            del samples["rewards"]
 
-        total_batch_size, num_timesteps = samples["timesteps"].shape
+        # total_batch_size, num_timesteps = samples["timesteps"].shape
 
-        
         # == inner epoch ==
+        local_step = 0
+        model.train()
         for inner_ep in range(cfg.get("inner_epoch", 10)):
             # rebatch for training
             samples_batched = {
-                k: v.reshape(-1, cfg.get("batch_size", None), *v.shape[1:])
+                k: v.reshape(-1, rewards.shape[0], *v.shape[1:])
                 for k, v in samples.items()
             }
 
@@ -474,42 +484,47 @@ def main():
                 position=0,
                 disable=not coordinator.is_master(),
             ):
-                for j in range(len(sample['timestep'])):
+                sample_args = samples_args[i]
+                for j in range(len(sample_args['timesteps'])):
+                    logger.info("Timestep %s..., global step %s", j, global_step)
                     # == diffusion loss computation ==
                     with timers["diffusion"] as loss_t:
                         # RL part and PPO logic
+                        # print("Local Rank ", coordinator.local_rank, sample["latents"][:, j].view(-1)[0])
                         log_prob = scheduler.RL_training_losses(
                             model,
-                            x,
-                            model_kwargs=samples["model_args"],
+                            sample["latents"][:, j].to(device, dtype=dtype),
+                            # model_kwargs=sample_args["model_args"],
+                            model_kwargs=None,
+                            noise=None,
                             mask=None,
-                            mask_index=[0], # i2v default
-                            x_gt=samples["latents"][:, j].to(device),
+                            weights=None,
+                            z_cond=sample_args["z_cond"].to(device),
                             t=j,
-                            timesteps=samples["timesteps"],
-                            noise_disable_threshold=cfg.get("noise_disable_threshold", None),
+                            timesteps=sample_args["timesteps"],
+                            mask_index=[0], # i2v default
                             text_uncond_prob=text_uncond_prob,
-                            gs=samples["gs"][j],
-                            x_noisy_ref=samples["x_noisy_ref"].to(device),
-                            next_latents=samples["next_latents"][:, j]
+                            gs=sample_args["gs"][j],
+                            next_latents=sample["next_latents"][:, j].to(device)
                         )
 
                         adv_clip_max = cfg.get("adv_clip_max", 5)
                         clip_range = cfg.get("clip_range", 1e-4)
                         # ppo logic
                         advantages = torch.clamp(
-                            sample["advantages"],
+                            sample["advantages"].to(device),
                             -adv_clip_max,
                             adv_clip_max,
                         )
-                        ratio = torch.exp(log_prob - sample["log_probs"][:, j])
-                        unclipped_loss = -advantages * ratio
+                        ratio = torch.exp(log_prob - sample["log_probs"][:, j].to(device))
+                        unclipped_loss = -advantages * ratio.unsqueeze(1)
                         clipped_loss = -advantages * torch.clamp(
-                            ratio,
+                            ratio.unsqueeze(1),
                             1.0 - clip_range,
                             1.0 + clip_range,
                         )
                         loss = torch.mean(torch.maximum(unclipped_loss, clipped_loss))
+                        # loss = log_prob.mean()
                     if record_time:
                         timer_list.append(loss_t)
 
@@ -523,8 +538,13 @@ def main():
                             else nullcontext()
                         )
                         with ctx:
+                            # for n, p in model.named_parameters():
+                            #     if n == 'module.spatial_blocks.1.cross_attn.kv_linear.weight':
+                            #         # p.grad = None
+                            #         p.retain_grad()
                             booster.backward(loss=loss, optimizer=optimizer)
-                        if (step + 1) % accumulation_steps == 0:
+                        
+                        if (local_step + 1) % accumulation_steps == 0:
                             optimizer.step()
                             optimizer.zero_grad()
 
@@ -534,6 +554,8 @@ def main():
                     if record_time:
                         timer_list.append(backward_t)
 
+                    local_step += 1
+                    
                     # == update EMA ==
                     with timers["update_ema"] as ema_t:
                         update_ema(ema, model.module, optimizer=optimizer, decay=cfg.get("ema_decay", 0.9999))
@@ -544,7 +566,7 @@ def main():
                     with timers["reduce_loss"] as reduce_loss_t:
                         all_reduce_mean(loss.data)
                         running_loss += loss.item() * accumulation_steps
-                        global_step = epoch * num_steps_per_epoch + step
+                        global_step += 1 # epoch * num_steps_per_epoch + step
                         log_step += 1
                         acc_step += 1
                     if record_time:
@@ -565,6 +587,8 @@ def main():
                                     "acc_step": acc_step,
                                     "epoch": epoch,
                                     "loss": loss.item() * accumulation_steps,
+                                    "advantage": advantages.mean().item(),
+                                    "ratio": ratio.mean().item(),
                                     "avg_loss": avg_loss,
                                     "lr": optimizer.param_groups[0]["lr"],
                                 }

@@ -249,7 +249,8 @@ class RFLOW:
                     cond_mask=z_cond_mask_in,
                     mask_index=mask_index,
                     y_null=y_null.repeat(
-                        z_in.shape[0], 1, 1, 1
+                        # z_in.shape[0], 1, 1, 1
+                        3, 1, 1, 1
                     ),  # NOTE: this shall not contain neg prompt info, strictly null
                     **model_args,
                 ).chunk(2, dim=1)[0]
@@ -368,6 +369,7 @@ class RFLOW:
         # text encoding
         model_args = text_encoder.encode(**text_encoder.tokenize_fn(prompts))
         y_null = text_encoder.null(n)  # [n, 1, 300, 4096] where n is batch size
+        self.model_args = model_args
         self.y_null = y_null
         if neg_prompts is None:
             if mask_index is not None and len(mask_index) > 0:
@@ -411,7 +413,8 @@ class RFLOW:
 
         progress_wrap = tqdm if progress else (lambda x: x)
 
-        all_latents = [z]
+        all_latents = []
+        all_next_latents = []
         all_log_probs = []
         gs = []
         for i, t in progress_wrap(enumerate(timesteps)):
@@ -457,6 +460,8 @@ class RFLOW:
                     # if type(image_gs) is not float:  # dev debug message
                     #     print(f"step {i}, image_gs:{image_gs[0,0,:,0,0]}")
 
+                all_latents.append(z)
+
                 z_in = torch.cat([z, z, z], 0)
                 t = torch.cat([t, t, t], 0)
 
@@ -471,7 +476,7 @@ class RFLOW:
                     cond_mask=z_cond_mask_in,
                     mask_index=mask_index,
                     y_null=y_null.repeat(
-                        z_in.shape[0], 1, 1, 1
+                        3, 1, 1, 1
                     ),  # NOTE: this shall not contain neg prompt info, strictly null
                     **model_args,
                 ).chunk(2, dim=1)[0]
@@ -507,11 +512,11 @@ class RFLOW:
             if mask is not None:
                 z = torch.where(mask_t_upper[:, None, :, None, None], z, x0)
             
-            all_latents.append(z)
+            all_next_latents.append(z)
             all_log_probs.append(step_log_prob)
             gs.append((image_gs, text_gs))
 
-        return z, timesteps, all_latents, all_log_probs, gs
+        return z, timesteps, all_latents, all_next_latents, all_log_probs, z_cond, gs
 
     def sample_debug(
         self,
@@ -618,6 +623,7 @@ class RFLOW:
         noise=None,
         mask=None,
         weights=None,
+        z_cond=None,
         t=None,
         timesteps=None,
         mask_index=None,
@@ -627,13 +633,14 @@ class RFLOW:
         **kwargs,
     ):
         v_pred = self.scheduler.RL_training_losses(
-            model,
-            x_start,
-            model_kwargs,
-            noise,
-            mask,
-            weights,
-            timesteps[t],
+            model=model,
+            x_start=x_start,
+            model_kwargs=self.model_args,
+            noise=noise,
+            mask=mask,
+            weights=weights,
+            z_cond=z_cond,
+            t=timesteps[t],
             mask_index=mask_index,
             text_uncond_prob=text_uncond_prob,
             image_gs=gs[0],
@@ -646,8 +653,8 @@ class RFLOW:
         dt = dt / self.num_timesteps  # shape (B,)
         # z: [B, F, C, H, W], t, dt: [], t: [0, 1000], dt: [0, 1]
         _, step_log_prob = self.rflow_step_with_logprob(
-            v_pred=v_pred,             # your already-computed velocity field
-            timestep=timesteps[t] / self.num_timesteps,                # the same t you passed into model(...)
+            v_pred=v_pred,
+            timestep=timesteps[t][0] / self.num_timesteps,                # the same passed into model(...)
             sample=x_start,                  # current z_t
             dt=dt,                     # normalized Δt
             mask_t_upper=None,

@@ -23,7 +23,7 @@ dataset = dict(
 bucket_config = {
     "256": {
         # 1: (1.0, 60),
-        45: (1.0, 8),  # 15
+        45: (1.0, 1),  # 15
         # 65: (1.0, 3),  # 20
         # 81: (1.0, 3),  # 25
         # 97: (1.0, 2),  # 30
@@ -33,10 +33,10 @@ bucket_config = {
 
 # i2v & v2v condition
 drop_condition = {
-    "cond": 0.05,
-    "text": 0.05,
-    "null": 0.05,
-    "keep": 0.90,  # 85% of the time don't drop anything
+    "cond": 0.00,
+    "text": 0.00,
+    "null": 0.00,
+    "keep": 1.00,  # no dropping
 }
 
 # i2v & v2v condition
@@ -62,7 +62,8 @@ plugin = "zero2"
 # Model settings
 model = dict(
     type="STDiT3-XL/2",
-    from_pretrained=None,
+    # from_pretrained=None,
+    from_pretrained="/users/xiaokangliu/projects/Open-Sora/outputs/0005-STDiT3-XL-2/epoch96-global_step3000/model",
     qk_norm=True,
     enable_flash_attn=True,
     enable_layernorm_kernel=True,
@@ -107,7 +108,7 @@ ckpt_every = 200
 
 # optimization settings
 grad_clip = 1.0
-lr = 1e-4
+lr = 1e-3
 ema_decay = 0.99
 adam_eps = 1e-15
 warmup_steps = 1000

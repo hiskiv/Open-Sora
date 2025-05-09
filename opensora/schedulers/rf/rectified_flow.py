@@ -45,8 +45,8 @@ class RFlowScheduler:
         noise=None,
         mask=None,
         weights=None,
+        z_cond=None,
         t=None,
-        x_gt=None,
         mask_index=None,
         noise_disable_threshold=None,
         text_uncond_prob=None,
@@ -61,13 +61,14 @@ class RFlowScheduler:
         Note: t is int tensor and should be rescaled from [0, num_timesteps-1] to [1,0]
         """
 
-        y_null = None
+        # y_null = None
         if mask_index is not None and len(mask_index) > 0:  # i2v and v2v
             num_frames = x_start.shape[2]
             x_cond_mask = torch.zeros_like(x_start, device=x_start.device)
             x_cond_mask[:, :, mask_index, :, :] = 1.0
-            x_noisy_ref = x_noisy_ref if x_noisy_ref is not None else x_start
-            x_cond = x_noisy_ref * x_cond_mask
+            # x_noisy_ref = x_noisy_ref if x_noisy_ref is not None else x_start
+            # x_cond = x_noisy_ref * x_cond_mask
+            x_cond = z_cond
             # y_null = (
             #     model.module.y_embedder.y_embedding[None]
             #     .repeat(model_kwargs["y"].shape[1], 1, 1)[:, None]
@@ -91,9 +92,6 @@ class RFlowScheduler:
             t = self.time_sampler.sample(x_start, self.num_timesteps, model_kwargs)
         if model_kwargs is None:
             model_kwargs = {}
-        if noise is None:
-            noise = torch.randn_like(x_start)
-        assert noise.shape == x_start.shape
 
         terms = {}
         # model_output = model(x_t, t, **model_kwargs)
@@ -102,20 +100,21 @@ class RFlowScheduler:
         x_cond_in = torch.cat([x_cond, x_cond, torch.zeros_like(x_cond).to(x_cond.device).to(x_cond.dtype)], 0)
         x_cond_mask_in = torch.cat([x_cond_mask, x_cond_mask, x_cond_mask], 0)
         
-        model_output = model(
+        pred = model(
             x_in,
             torch.cat([t] * 3),
             cond=x_cond_in,
             cond_mask=x_cond_mask_in,
             mask_index=mask_index,
             y_null=y_null.repeat(
-                x_in.shape[0], 1, 1, 1
-            ),
-            text_uncond_prob=text_uncond_prob,
+                3, 1, 1, 1
+            ),  # NOTE: this shall not contain neg prompt info, strictly null
             **model_kwargs,
         )
-        pred = model_output.chunk(2, dim=1)[0]
-        pred_cond, pred_uncond_text, pred_uncond_all = pred.chunk(3, dim=0)
+        pred = pred[:, :pred.shape[1] // 2, :, :, :]
+        # pred_cond, pred_uncond_text, pred_uncond_all = pred.chunk(3, dim=0)
+        shape_div3 = pred.shape[0] // 3
+        pred_cond, pred_uncond_text, pred_uncond_all = pred[:shape_div3], pred[shape_div3:-shape_div3], pred[-shape_div3:]
         v_pred = (
             pred_uncond_all
             + image_gs * (pred_uncond_text - pred_uncond_all)
