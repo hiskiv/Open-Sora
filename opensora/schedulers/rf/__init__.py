@@ -236,12 +236,6 @@ class RFLOW:
                 z_cond_in = torch.cat([z_cond, z_cond, torch.zeros_like(z_cond).to(z_cond.device).to(z_cond.dtype)], 0)
                 z_cond_mask_in = torch.cat([z_cond_mask, z_cond_mask, z_cond_mask], 0)
 
-                print(z_in.shape)
-                print(t.shape)
-                print(z_cond_in.shape)
-                print(z_cond_mask_in.shape)
-                print(y_null.shape)
-                print(model_args)
                 pred = model(
                     z_in,
                     t,
@@ -508,6 +502,7 @@ class RFLOW:
                 mask_t_upper=mask_t_upper if mask is not None else None,
                 prev_sample=None           # or pass in a tensor to bypass sampling
             )
+            # z = z + v_pred * dt[:, None, None, None, None]
 
             if mask is not None:
                 z = torch.where(mask_t_upper[:, None, :, None, None], z, x0)

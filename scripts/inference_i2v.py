@@ -314,9 +314,6 @@ def main():
                 if len(mask_index) > 0:
                     x_cond_mask[:, :, mask_index, :, :] = 1.0
 
-                print(batch_prompts_loop)
-                print(neg_prompts_batch_cl)
-                print(model_args)
                 samples = scheduler.sample(
                 # samples = scheduler.sample_with_logprobs(
                     model,
@@ -350,7 +347,7 @@ def main():
                         dtype,
                     )
 
-                video_clips.append(samples)
+                video_clips.append(samples) # [[B, C, T, H, W]]
 
             # == save samples ==
             if is_main_process():
@@ -358,7 +355,7 @@ def main():
                     if verbose >= 2:
                         logger.info("Prompt: %s", batch_prompt)
                     save_path = save_paths[idx]
-                    video = [video_clips[i][idx] for i in range(loop)]
+                    video = [video_clips[i][idx] for i in range(loop)] # [[C, T, H, W]]
                     for i in range(1, loop):
                         video[i] = video[i][:, condition_frame_length:]  # latent video concat
                     video = torch.cat(video, dim=1)  # latent [C, T, H, W]
@@ -367,7 +364,7 @@ def main():
                     if t_cut < video.size(1):
                         video = video[:, :t_cut]
 
-                    video = vae.decode(video.to(dtype), num_frames=t_cut * 17 // 5).squeeze(0)
+                    video = vae.decode(video.to(dtype), num_frames=t_cut * 17 // 5).squeeze(0) # [C, T, H, W] real shape
 
                     print("video size:", video.size())
                     save_path = save_sample(

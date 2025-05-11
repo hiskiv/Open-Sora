@@ -20,8 +20,8 @@ use_oscillation_guidance_for_image = True
 
 model = dict(
     type="STDiT3-XL/2",
-    # from_pretrained="/users/xiaokangliu/projects/Open-Sora/outputs/0002-STDiT3-XL-2/epoch225-global_step7000/model",
-    from_pretrained="/users/xiaokangliu/models/OpenSora-STDiT-v4-i2v/",
+    from_pretrained="/users/xiaokangliu/projects/Open-Sora/outputs/0005-STDiT3-XL-2/epoch193-global_step6000/model",
+    # from_pretrained="/users/xiaokangliu/models/OpenSora-STDiT-v4-i2v/",
     qk_norm=True,
     enable_flash_attn=True,
     enable_layernorm_kernel=True,

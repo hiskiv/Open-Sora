@@ -23,7 +23,7 @@ dataset = dict(
 bucket_config = {
     "256": {
         # 1: (1.0, 60),
-        45: (1.0, 1),  # 15
+        45: (1.0, 4),  # 15
         # 65: (1.0, 3),  # 20
         # 81: (1.0, 3),  # 25
         # 97: (1.0, 2),  # 30
@@ -63,7 +63,7 @@ plugin = "zero2"
 model = dict(
     type="STDiT3-XL/2",
     # from_pretrained=None,
-    from_pretrained="/users/xiaokangliu/projects/Open-Sora/outputs/0005-STDiT3-XL-2/epoch96-global_step3000/model",
+    from_pretrained="/users/xiaokangliu/projects/Open-Sora/outputs/0005-STDiT3-XL-2/epoch193-global_step6000/",
     qk_norm=True,
     enable_flash_attn=True,
     enable_layernorm_kernel=True,
@@ -101,14 +101,14 @@ scheduler = dict(
 # Log settings
 seed = 4207
 outputs = "outputs/"
-wandb = False
+wandb = True
 epochs = 1000
 log_every = 8
-ckpt_every = 200
+ckpt_every = 300
 
 # optimization settings
 grad_clip = 1.0
-lr = 1e-3
+lr = 1e-4
 ema_decay = 0.99
 adam_eps = 1e-15
 warmup_steps = 1000

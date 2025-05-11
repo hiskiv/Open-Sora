@@ -43,6 +43,29 @@ from opensora.utils.train_utils import (
 )
 
 
+from opensora.datasets import save_sample
+def vis_samples(videos, vae, dtype, save_path):
+    for idx in range(videos.shape[0]): # B
+        # save_path = "samples/vis/"
+        save_path_item = os.path.join(save_path, f'{idx}.mp4')
+        video = torch.Tensor(videos[idx]) # [[C, T, H, W]]
+        # video = torch.cat(video, dim=1)  # latent [C, T, H, W]
+        # ensure latent frame size is multiples of 5
+        t_cut = video.size(1) // 5 * 5
+        if t_cut < video.size(1):
+            video = video[:, :t_cut]
+
+        video = vae.decode(video.to(dtype), num_frames=t_cut * 17 // 5).squeeze(0) # [C, T, H, W] real shape
+
+        print("video size:", video.size())
+        save_path_item = save_sample(
+            video,
+            fps=24,
+            save_path=save_path_item,
+            verbose=False
+        )
+        
+
 def main():
     # ======================================================
     # 1. configs & runtime variables
@@ -319,6 +342,8 @@ def main():
                 if record_time:
                     timer_list.append(move_data_t)
 
+                additional_args = {'height': torch.tensor([x.shape[-1]], device=device, dtype=dtype), 'width': torch.tensor([x.shape[-1]], device=device, dtype=dtype), 'num_frames': torch.tensor([x.shape[2]], device=device, dtype=dtype), 'ar': torch.tensor([1.], device=device, dtype=dtype), 'fps': torch.tensor([24.], device=device, dtype=dtype)}
+
                 # == prepare i2v&v2v mask_index ==
                 with timers["mask_index"] as mask_index_t:
                     num_frames = x.shape[2]
@@ -338,9 +363,9 @@ def main():
                 with timers["encode"] as encode_t:
                     x_noisy_ref = None  # for v2v, add a little noise to video's referenced part
                     with torch.no_grad():
-                        x_noisy = x
+                        # x_noisy = x
 
-                        x_noisy_ref = vae.encode(x_noisy)
+                        # x_noisy_ref = vae.encode(x_noisy)
 
                         x_gt = x = vae.encode(x)  # [B, C, T, H/P, W/P]
 
@@ -375,6 +400,8 @@ def main():
 
                 # == sampling latents, log_prob and generated videos ==
                 with torch.no_grad():
+                    model.eval()
+
                     cond_type = cfg.get("cond_type", None)
                     image_cfg_scale = None
                     image_cfg_scale = cfg.get("image_cfg_scale", 7.5)
@@ -389,9 +416,9 @@ def main():
                     x_cond_mask = torch.zeros(target_shape, device=device).to(dtype)
                     if len(mask_index) > 0:
                         x_cond_mask[:, :, mask_index, :, :] = 1.0
-                    ############ Hard encoding of FPS; NEED TO MODIFY ############
-                    additional_args = {'height': torch.tensor([x.shape[-1]], device=device, dtype=dtype), 'width': torch.tensor([x.shape[-1]], device=device, dtype=dtype), 'num_frames': torch.tensor([x.shape[2]], device=device, dtype=dtype), 'ar': torch.tensor([1.], device=device, dtype=dtype), 'fps': torch.tensor([24.], device=device, dtype=dtype)}
+                    ############ Hard encoding of FPS; MODIFY LATER ############
                     videos, timesteps, all_latents, all_next_latents, all_log_probs, z_cond, gs = scheduler.sample_with_logprobs(
+                    # videos = scheduler.sample(
                         model,
                         text_encoder,
                         z=z,
@@ -414,9 +441,23 @@ def main():
                     all_next_latents = torch.stack(all_next_latents, dim=1).to('cpu')
                     all_log_probs = torch.stack(all_log_probs, dim=1).to('cpu')  # (B, num_steps, 1)
 
-                    # videos = vae.decode(videos.to(dtype))
+                    # video decoding and reward computing
+                    # ensure latent frame size is multiples of 5
+                    # t_cut = videos.size(2) // 5 * 5
+                    # if t_cut < videos.size(2):
+                    #     videos = videos[:, :, :t_cut]
+
+                    # videos = vae.decode(videos.to(dtype), num_frames=t_cut * 17 // 5) # [B, C, T, H, W] in real size
                     # rewards = circle_reward(x, videos)
-                    rewards = torch.rand(all_log_probs.shape) # TBD
+                    
+                    rewards = torch.mean((videos - x) ** 2, dim=(1, 2, 3, 4), keepdim=False).unsqueeze(1) # [B, 1]
+                    # rewards = torch.rand(all_log_probs.shape) # TBD
+
+                    # Debug
+                    # print(rewards)
+                    vis_samples(videos, vae, dtype, 'samples/vis/gen/')
+                    vis_samples(x, vae, dtype, 'samples/vis/gt/')
+
                     ########## Also consider implement asynchronous reward computing
 
                     samples.append(
@@ -466,7 +507,7 @@ def main():
         # == inner epoch ==
         local_step = 0
         model.train()
-        for inner_ep in range(cfg.get("inner_epoch", 10)):
+        for inner_ep in range(cfg.get("inner_epoch", 1)):
             # rebatch for training
             samples_batched = {
                 k: v.reshape(-1, rewards.shape[0], *v.shape[1:])
@@ -486,7 +527,8 @@ def main():
             ):
                 sample_args = samples_args[i]
                 for j in range(len(sample_args['timesteps'])):
-                    logger.info("Timestep %s..., global step %s", j, global_step)
+                    if global_step % 20 == 0:
+                        logger.info("Sample %s, Timestep %s..., global step %s", i, j, global_step)
                     # == diffusion loss computation ==
                     with timers["diffusion"] as loss_t:
                         # RL part and PPO logic
@@ -586,6 +628,7 @@ def main():
                                     "iter": global_step,
                                     "acc_step": acc_step,
                                     "epoch": epoch,
+                                    "inner_epoch": inner_ep,
                                     "loss": loss.item() * accumulation_steps,
                                     "advantage": advantages.mean().item(),
                                     "ratio": ratio.mean().item(),
